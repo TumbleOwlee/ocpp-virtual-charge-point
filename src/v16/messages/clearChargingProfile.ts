@@ -26,6 +26,12 @@ class ClearChargingProfileOcppMessage extends OcppIncoming<
     vcp: VCP,
     call: OcppCall<z.infer<ClearChargingProfileReqType>>,
   ): Promise<void> => {
+    const { connectorId } = call.payload;
+    if (connectorId != null) {
+      vcp.connectorLimitW.delete(connectorId);
+    } else {
+      vcp.connectorLimitW.clear();
+    }
     vcp.respond(this.response(call, { status: "Accepted" }));
   };
 }

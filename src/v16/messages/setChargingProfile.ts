@@ -1,7 +1,11 @@
 import { z } from "zod";
 import { type OcppCall, OcppIncoming } from "../../ocppMessage";
 import type { VCP } from "../../vcp";
-import { ChargingProfileSchema, ConnectorIdSchema } from "./_common";
+import {
+  ChargingProfileSchema,
+  ConnectorIdSchema,
+  computeLimitW,
+} from "./_common";
 
 const SetChargingProfileReqSchema = z.object({
   connectorId: ConnectorIdSchema,
@@ -22,6 +26,10 @@ class SetChargingProfileOcppMessage extends OcppIncoming<
     vcp: VCP,
     call: OcppCall<z.infer<SetChargingProfileReqType>>,
   ): Promise<void> => {
+    const { connectorId, csChargingProfiles } = call.payload;
+    const limitW = computeLimitW(csChargingProfiles.chargingSchedule);
+    vcp.connectorLimitW.set(connectorId, limitW);
+    vcp.transactionManager.updateLimitAndFlush(connectorId, limitW);
     vcp.respond(this.response(call, { status: "Accepted" }));
   };
 }

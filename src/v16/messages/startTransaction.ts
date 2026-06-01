@@ -34,23 +34,43 @@ class StartTransactionOcppMessage extends OcppOutgoing<
     call: OcppCall<z.infer<StartTransactionReqType>>,
     result: OcppCallResult<z.infer<StartTransactionResType>>,
   ): Promise<void> => {
+    const connectorId = call.payload.connectorId;
+    // Connector-specific limit takes precedence over charge-point-wide (id 0).
+    const limitW =
+      vcp.connectorLimitW.get(connectorId) ??
+      vcp.connectorLimitW.get(0) ??
+      vcp.transactionManager.getDefaultLimitW();
+
     vcp.transactionManager.startTransaction(vcp, {
       transactionId: result.payload.transactionId,
       idTag: call.payload.idTag,
-      connectorId: call.payload.connectorId,
+      connectorId,
+      limitW,
       meterValuesCallback: async (transactionState) => {
+        const powerKw = transactionState.limitW / 1000;
+        const currentA = transactionState.limitW / (3 * 230);
         vcp.send(
           meterValuesOcppMessage.request({
-            connectorId: call.payload.connectorId,
+            connectorId,
             transactionId: result.payload.transactionId,
             meterValue: [
               {
                 timestamp: new Date().toISOString(),
                 sampledValue: [
                   {
-                    value: (transactionState.meterValue / 1000).toString(),
+                    value: (transactionState.meterValue / 1000).toFixed(3),
                     measurand: "Energy.Active.Import.Register",
                     unit: "kWh",
+                  },
+                  {
+                    value: powerKw.toFixed(2),
+                    measurand: "Power.Active.Import",
+                    unit: "kW",
+                  },
+                  {
+                    value: currentA.toFixed(2),
+                    measurand: "Current.Import",
+                    unit: "A",
                   },
                 ],
               },

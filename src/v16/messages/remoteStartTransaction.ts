@@ -5,6 +5,7 @@ import {
   ChargingProfileSchema,
   ConnectorIdSchema,
   IdTokenSchema,
+  computeLimitW,
 } from "./_common";
 import { startTransactionOcppMessage } from "./startTransaction";
 import { statusNotificationOcppMessage } from "./statusNotification";
@@ -38,6 +39,12 @@ class RemoteStartTransactionOcppMessage extends OcppIncoming<
     ) {
       vcp.respond(this.response(call, { status: "Rejected" }));
       return;
+    }
+    if (call.payload.chargingProfile) {
+      vcp.connectorLimitW.set(
+        call.payload.connectorId,
+        computeLimitW(call.payload.chargingProfile.chargingSchedule),
+      );
     }
     vcp.respond(this.response(call, { status: "Accepted" }));
     vcp.send(

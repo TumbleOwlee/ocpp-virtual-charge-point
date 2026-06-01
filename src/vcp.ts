@@ -52,6 +52,10 @@ export class VCP {
 
   transactionManager = new TransactionManager();
 
+  // Active charging limit in watts per connector (key 0 = whole charge point).
+  // Set by SetChargingProfile, cleared by ClearChargingProfile.
+  connectorLimitW = new Map<number, number>();
+
   constructor(private vcpOptions: VCPOptions) {
     this.messageHandler = resolveMessageHandler(vcpOptions.ocppVersion);
     if (vcpOptions.adminPort) {

@@ -53,6 +53,19 @@ export const ChargingProfileSchema = z
     }
   });
 
+// Resolves the effective power limit in watts from a charging schedule.
+// Uses the first period's limit; converts amps to watts assuming 230 V per phase.
+export function computeLimitW(
+  schedule: z.infer<typeof ChargingScheduleSchema>,
+): number {
+  const period = schedule.chargingSchedulePeriod[0];
+  if (schedule.chargingRateUnit === "W") {
+    return period.limit;
+  }
+  const phases = period.numberPhases ?? 3;
+  return period.limit * phases * 230;
+}
+
 export const MeterValueSchema = z.object({
   timestamp: z.string().datetime(),
   sampledValue: z

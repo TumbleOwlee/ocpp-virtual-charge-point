@@ -1,6 +1,7 @@
 import type { VCP } from "./vcp";
 
 const METER_VALUES_INTERVAL_SEC = 15;
+const DEFAULT_LIMIT_W = 11_000; // 11 kW ≈ 16 A per phase at 230 V
 
 type TransactionId = string | number;
 
@@ -11,6 +12,7 @@ interface TransactionState {
   meterValue: number;
   evseId?: number;
   connectorId: number;
+  limitW: number;
 }
 
 interface StartTransactionProps {
@@ -18,14 +20,17 @@ interface StartTransactionProps {
   idTag: string;
   evseId?: number;
   connectorId: number;
+  limitW: number;
   meterValuesCallback: (transactionState: TransactionState) => Promise<void>;
 }
 
+type StoredTransaction = TransactionState & {
+  meterValuesTimer: ReturnType<typeof setInterval>;
+  meterValuesCallback: (transactionState: TransactionState) => Promise<void>;
+};
+
 export class TransactionManager {
-  transactions: Map<
-    TransactionId,
-    TransactionState & { meterValuesTimer: ReturnType<typeof setInterval> }
-  > = new Map();
+  transactions: Map<TransactionId, StoredTransaction> = new Map();
 
   canStartNewTransaction(connectorId: number) {
     return !Array.from(this.transactions.values()).some(
@@ -34,27 +39,46 @@ export class TransactionManager {
   }
 
   startTransaction(vcp: VCP, startTransactionProps: StartTransactionProps) {
-    const meterValuesTimer = setInterval(() => {
-      // biome-ignore lint/style/noNonNullAssertion: transaction must exist
-      const currentTransactionState = this.transactions.get(
-        startTransactionProps.transactionId,
-      )!;
-      const { meterValuesTimer, ...currentTransaction } =
-        currentTransactionState;
-      startTransactionProps.meterValuesCallback({
-        ...currentTransaction,
-        meterValue: this.getMeterValue(startTransactionProps.transactionId),
+    const { transactionId, meterValuesCallback } = startTransactionProps;
+    const fireMeterValues = () => {
+      // biome-ignore lint/style/noNonNullAssertion: transaction must exist while timer runs
+      const tx = this.transactions.get(transactionId)!;
+      const { meterValuesTimer: _t, meterValuesCallback: _cb, ...state } = tx;
+      tx.meterValuesCallback({
+        ...state,
+        meterValue: this.getMeterValue(transactionId),
       });
-    }, METER_VALUES_INTERVAL_SEC * 1000);
-    this.transactions.set(startTransactionProps.transactionId, {
-      transactionId: startTransactionProps.transactionId,
+    };
+    const meterValuesTimer = setInterval(
+      fireMeterValues,
+      METER_VALUES_INTERVAL_SEC * 1000,
+    );
+    this.transactions.set(transactionId, {
+      transactionId,
       idTag: startTransactionProps.idTag,
       meterValue: 0,
       startedAt: new Date(),
       evseId: startTransactionProps.evseId,
       connectorId: startTransactionProps.connectorId,
-      meterValuesTimer: meterValuesTimer,
+      limitW: startTransactionProps.limitW,
+      meterValuesTimer,
+      meterValuesCallback,
     });
+  }
+
+  // Update the active limit for all transactions on a connector and immediately
+  // send a MeterValues message reflecting the new limit.
+  updateLimitAndFlush(connectorId: number, limitW: number): void {
+    for (const [txId, tx] of this.transactions) {
+      if (connectorId === 0 || tx.connectorId === connectorId) {
+        tx.limitW = limitW;
+        const { meterValuesTimer: _t, meterValuesCallback, ...state } = tx;
+        meterValuesCallback({
+          ...state,
+          meterValue: this.getMeterValue(txId),
+        });
+      }
+    }
   }
 
   stopTransaction(transactionId: TransactionId) {
@@ -70,6 +94,12 @@ export class TransactionManager {
     if (!transaction) {
       return 0;
     }
-    return (new Date().getTime() - transaction.startedAt.getTime()) / 100;
+    const elapsedMs = new Date().getTime() - transaction.startedAt.getTime();
+    // Wh = W × h = limitW × (elapsedMs / 3_600_000)
+    return (transaction.limitW * elapsedMs) / 3_600_000;
+  }
+
+  getDefaultLimitW(): number {
+    return DEFAULT_LIMIT_W;
   }
 }
