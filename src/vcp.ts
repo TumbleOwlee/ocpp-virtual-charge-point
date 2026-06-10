@@ -30,6 +30,8 @@ interface VCPOptions {
   chargePointId: string;
   basicAuthPassword?: string;
   adminPort?: number;
+  reconnectIntervalMs?: number;
+  onConnected?: (vcp: VCP) => void | Promise<void>;
 }
 
 interface LogEntry {
@@ -47,6 +49,7 @@ export class VCP {
   private heartbeatIntervalId?: ReturnType<typeof setInterval>;
 
   private isFinishing = false;
+  private _reconnectScheduled = false;
 
   private postMessageActions: Record<string, () => void | Promise<void>> = {};
 
@@ -57,6 +60,10 @@ export class VCP {
     if (vcpOptions.adminPort) {
       const adminApi = new Hono();
       adminApi.get("/health", (c) => c.text("OK"));
+      adminApi.get("/status", (c) => {
+        return c.json({ connected: this.ws?.readyState === WebSocket.OPEN });
+      });
+      adminApi.get("/", (c) => c.html(ADMIN_UI_HTML));
       adminApi.post(
         "/execute",
         zValidator(
@@ -68,7 +75,11 @@ export class VCP {
         ),
         (c) => {
           const validated = c.req.valid("json");
-          this.send(call(validated.action, validated.payload));
+          try {
+            this.send(call(validated.action, validated.payload));
+          } catch (e) {
+            return c.json({ error: String(e) }, 503);
+          }
           return c.text("OK");
         },
       );
@@ -97,7 +108,12 @@ export class VCP {
         },
       });
 
-      this.ws.on("open", () => resolve());
+      this.ws.on("open", async () => {
+        if (this.vcpOptions.onConnected) {
+          await this.vcpOptions.onConnected(this);
+        }
+        resolve();
+      });
       this.ws.on("message", (message: string) => this._onMessage(message));
       this.ws.on("ping", () => {
         logger.info("Received PING");
@@ -111,7 +127,7 @@ export class VCP {
       this.ws.on("error", (error: Error) => {
         logger.error("Websocket error:");
         logger.error(error);
-        close(this);
+        this._handleDisconnect();
       });
     });
   }
@@ -178,18 +194,16 @@ export class VCP {
   }
 
   close() {
-    if (!this.ws) {
-      throw new Error(
-        "Trying to close a Websocket that was not opened. Call connect() first",
-      );
-    }
     this.isFinishing = true;
     if (this.heartbeatIntervalId) {
       clearInterval(this.heartbeatIntervalId);
       this.heartbeatIntervalId = undefined;
     }
-    this.ws.close();
-    this.ws = undefined;
+    if (this.ws) {
+      this.ws.removeAllListeners();
+      this.ws.close();
+      this.ws = undefined;
+    }
     if (this.adminServer) {
       this.adminServer.close();
       this.adminServer = undefined;
@@ -299,11 +313,231 @@ export class VCP {
     }
   }
 
+  private _handleDisconnect() {
+    if (this.vcpOptions.reconnectIntervalMs !== undefined) {
+      this._scheduleReconnect();
+    } else {
+      close(this);
+    }
+  }
+
+  private _scheduleReconnect() {
+    if (this.isFinishing || this._reconnectScheduled) return;
+    this._reconnectScheduled = true;
+    const ms = this.vcpOptions.reconnectIntervalMs!;
+    logger.info(`Reconnecting in ${ms / 1000}s...`);
+    setTimeout(() => {
+      this._reconnectScheduled = false;
+      this._doReconnect();
+    }, ms);
+  }
+
+  private _doReconnect() {
+    if (this.isFinishing) return;
+    if (this.heartbeatIntervalId) {
+      clearInterval(this.heartbeatIntervalId);
+      this.heartbeatIntervalId = undefined;
+    }
+    if (this.ws) {
+      this.ws.removeAllListeners();
+      this.ws.close();
+      this.ws = undefined;
+    }
+    this.connect().catch((e) => logger.error(`Reconnect error: ${e}`));
+  }
+
   private _onClose(code: number, reason: string) {
     if (this.isFinishing) {
       return;
     }
     logger.info(`Connection closed. code=${code}, reason=${reason}`);
-    close(this);
+    this._handleDisconnect();
   }
 }
+
+const ADMIN_UI_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OCPP VCP Admin</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#0f0f0f;color:#e0e0e0;padding:16px}
+h1{font-size:18px;margin-bottom:8px;color:#fff}
+.status{display:inline-block;padding:3px 10px;border-radius:10px;font-size:12px;margin-bottom:14px}
+.ok{background:#1a3a1a;color:#4caf50;border:1px solid #2e5c2e}
+.err{background:#3a1a1a;color:#f44336;border:1px solid #5c2e2e}
+.params{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.p{display:flex;flex-direction:column;gap:3px}
+.p label{font-size:11px;color:#888}
+.p input{background:#1e1e1e;border:1px solid #333;color:#e0e0e0;padding:4px 8px;border-radius:4px;font-size:13px;width:150px}
+.group{margin-bottom:13px}
+.group h2{font-size:11px;color:#666;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;border-bottom:1px solid #1e1e1e;padding-bottom:3px}
+.btns{display:flex;flex-wrap:wrap;gap:5px}
+button{background:#1e1e2e;border:1px solid #333;color:#bbb;padding:5px 11px;border-radius:4px;cursor:pointer;font-size:12px;transition:background .1s,border-color .1s}
+button:hover{background:#2a2a3e;border-color:#555;color:#fff}
+button:disabled{opacity:.5;cursor:default}
+.seq{border-color:#4a3a00;color:#ffc107}
+.seq:hover{background:#2a2000;border-color:#ffc107}
+.flash-ok{background:#1a3a1a!important;border-color:#4caf50!important;color:#4caf50!important}
+.flash-err{background:#3a1a1a!important;border-color:#f44336!important;color:#f44336!important}
+#log{background:#111;border:1px solid #222;border-radius:4px;padding:8px;font-family:monospace;font-size:11px;height:180px;overflow-y:auto;margin-top:14px}
+.le{padding:1px 0;border-bottom:1px solid #191919;color:#888}
+.le .t{color:#444;margin-right:6px}
+.le.ok .m{color:#4caf50}
+.le.er .m{color:#f44336}
+</style>
+</head>
+<body>
+<h1>OCPP VCP Admin <span style="color:#555;font-weight:normal;font-size:13px">1.6</span></h1>
+<div id="st" class="status">...</div>
+<div class="params">
+  <div class="p"><label>RFID Tag</label><input id="idTag" value="AABBCCDD"></div>
+  <div class="p"><label>Transaction ID</label><input id="txId" type="number" value="1"></div>
+  <div class="p"><label>Connector ID</label><input id="cId" type="number" value="1"></div>
+  <div class="p"><label>Meter Stop (Wh)</label><input id="mSt" type="number" value="2000"></div>
+</div>
+<div id="groups"></div>
+<div id="log"></div>
+<script>
+var g = function(id){ return document.getElementById(id); };
+var ts = function(){ return new Date().toISOString(); };
+var idTag = function(){ return g('idTag').value; };
+var txId = function(){ return parseInt(g('txId').value)||1; };
+var cId = function(){ return parseInt(g('cId').value)||1; };
+var mSt = function(){ return parseInt(g('mSt').value)||2000; };
+
+var COMMANDS = [
+  {gr:'Authorize',lb:'Authorize',ac:'Authorize',pl:function(){return {idTag:idTag()};}},
+  {gr:'Authorize',lb:'Authorize (non-existing)',ac:'Authorize',pl:function(){return {idTag:'non-existing-token'};}},
+  {gr:'Status Notification',lb:'Available',ac:'StatusNotification',pl:function(){return {connectorId:cId(),errorCode:'NoError',status:'Available',timestamp:ts()};}},
+  {gr:'Status Notification',lb:'Preparing',ac:'StatusNotification',pl:function(){return {connectorId:cId(),errorCode:'NoError',status:'Preparing',timestamp:ts()};}},
+  {gr:'Status Notification',lb:'Charging',ac:'StatusNotification',pl:function(){return {connectorId:cId(),errorCode:'NoError',status:'Charging',timestamp:ts()};}},
+  {gr:'Status Notification',lb:'SuspendedEV',ac:'StatusNotification',pl:function(){return {connectorId:cId(),errorCode:'NoError',status:'SuspendedEV',timestamp:ts()};}},
+  {gr:'Status Notification',lb:'SuspendedEVSE',ac:'StatusNotification',pl:function(){return {connectorId:cId(),errorCode:'NoError',status:'SuspendedEVSE',timestamp:ts()};}},
+  {gr:'Status Notification',lb:'Finishing',ac:'StatusNotification',pl:function(){return {connectorId:cId(),errorCode:'NoError',status:'Finishing',timestamp:ts()};}},
+  {gr:'Status Notification',lb:'Reserved',ac:'StatusNotification',pl:function(){return {connectorId:cId(),errorCode:'NoError',status:'Reserved',timestamp:ts()};}},
+  {gr:'Status Notification',lb:'Unavailable',ac:'StatusNotification',pl:function(){return {connectorId:cId(),errorCode:'NoError',status:'Unavailable',timestamp:ts()};}},
+  {gr:'Status Notification',lb:'Faulted',ac:'StatusNotification',pl:function(){return {connectorId:cId(),errorCode:'InternalError',status:'Faulted',timestamp:ts()};}},
+  {gr:'Status Notification',lb:'Connector 2 Available',ac:'StatusNotification',pl:function(){return {connectorId:2,errorCode:'NoError',status:'Available',timestamp:ts()};}},
+  {gr:'Transaction',lb:'Start Transaction',ac:'StartTransaction',pl:function(){return {connectorId:cId(),idTag:idTag(),meterStart:0,timestamp:ts()};}},
+  {gr:'Transaction',lb:'Start Transaction (Reserved)',ac:'StartTransaction',pl:function(){return {connectorId:cId(),idTag:idTag(),meterStart:0,reservationId:44,timestamp:ts()};}},
+  {gr:'Transaction',lb:'Stop Transaction',ac:'StopTransaction',pl:function(){return {transactionId:txId(),timestamp:ts(),meterStop:mSt()};}},
+  {gr:'Transaction',lb:'Meter Values',ac:'MeterValues',pl:function(){return {connectorId:cId(),transactionId:txId(),meterValue:[{timestamp:ts(),sampledValue:[{value:1,measurand:'Power.Active.Import',unit:'kW'},{value:'43.123456789',measurand:'Energy.Active.Import.Register',unit:'kWh'}]}]};}},
+  {gr:'Transaction',lb:'Meter Values (Power L1-N)',ac:'MeterValues',pl:function(){return {connectorId:cId(),transactionId:txId(),meterValue:[{timestamp:ts(),sampledValue:[{value:'0',context:'Sample.Periodic',format:'Raw',measurand:'Power.Active.Import',phase:'L1-N',location:'Outlet',unit:'Wh'},{value:'0',context:'Sample.Periodic',format:'Raw',measurand:'Power.Active.Import',phase:'L1-N',location:'Outlet',unit:'Percent'}]}]};}},
+  {gr:'Data Transfer',lb:'Data Transfer',ac:'DataTransfer',pl:function(){return {vendorId:'TEST',data:'TEST'};}},
+  {gr:'Firmware',lb:'Firmware Status: Installed',ac:'FirmwareStatusNotification',pl:function(){return {status:'Installed'};}},
+  {gr:'Security',lb:'Log Status: Uploaded',ac:'LogStatusNotification',pl:function(){return {status:'Uploaded'};}},
+  {gr:'Security',lb:'Security Event Notification',ac:'SecurityEventNotification',pl:function(){return {timestamp:ts(),type:'InalidCentralSystemCertificate'};}},
+  {gr:'Security',lb:'Sign Certificate',ac:'SignCertificate',pl:function(){return {csr:'-----BEGIN CERTIFICATE REQUEST-----'};}},
+  {gr:'Security',lb:'Signed Firmware Status: Installed',ac:'SignedFirmwareStatusNotification',pl:function(){return {status:'Installed'};}},
+];
+
+var SEQUENCES = [
+  {gr:'Security',lb:'▶ Firmware Update OK Sequence',steps:[
+    {d:0,ac:'SignedFirmwareStatusNotification',pl:{status:'Downloading'}},
+    {d:2000,ac:'SignedFirmwareStatusNotification',pl:{status:'Downloaded'}},
+    {d:2000,ac:'SignedFirmwareStatusNotification',pl:{status:'SignatureVerified'}},
+    {d:0,ac:'StatusNotification',pl:function(){return {status:'Unavailable',connectorId:1,errorCode:'NoError',timestamp:ts()};}},
+    {d:2000,ac:'SignedFirmwareStatusNotification',pl:{status:'Installing'}},
+    {d:2000,ac:'SignedFirmwareStatusNotification',pl:{status:'InstallRebooting'}},
+    {d:2000,ac:'SecurityEventNotification',pl:function(){return {timestamp:ts(),type:'FirmwareUpdated'};}},
+    {d:0,ac:'StatusNotification',pl:function(){return {status:'Available',connectorId:1,errorCode:'NoError',timestamp:ts()};}},
+    {d:2000,ac:'SignedFirmwareStatusNotification',pl:{status:'Installed'}},
+  ]},
+];
+
+function send(action, payload, cb) {
+  fetch('/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action,payload:payload})})
+    .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); cb(null); })
+    .catch(function(e){ cb(e); });
+}
+
+function addLog(msg, type) {
+  var el = g('log');
+  var d = document.createElement('div');
+  d.className = 'le '+(type||'');
+  var t = new Date().toTimeString().slice(0,8);
+  d.innerHTML = '<span class="t">'+t+'</span><span class="m">'+msg+'</span>';
+  el.insertBefore(d, el.firstChild);
+}
+
+function flash(btn, cls) {
+  btn.classList.add(cls);
+  setTimeout(function(){ btn.classList.remove(cls); }, 700);
+}
+
+function onCmd(btn, ac, pl) {
+  var payload = typeof pl === 'function' ? pl() : pl;
+  send(ac, payload, function(err) {
+    if(err){ flash(btn,'flash-err'); addLog('x '+ac+': '+err.message,'er'); }
+    else { flash(btn,'flash-ok'); addLog('> '+ac,'ok'); }
+  });
+}
+
+function runSeq(btn, steps, i) {
+  if(i >= steps.length){ btn.disabled = false; return; }
+  var step = steps[i];
+  var exec = function() {
+    var payload = typeof step.pl === 'function' ? step.pl() : step.pl;
+    send(step.ac, payload, function(err) {
+      var label = step.ac+(payload.status ? ' ('+payload.status+')' : '');
+      if(err) addLog('x '+label+': '+err.message,'er');
+      else addLog('> '+label,'ok');
+      runSeq(btn, steps, i+1);
+    });
+  };
+  if(step.d > 0) setTimeout(exec, step.d); else exec();
+}
+
+var gmap = {};
+COMMANDS.forEach(function(c){
+  if(!gmap[c.gr]) gmap[c.gr]={cmds:[],seqs:[]};
+  gmap[c.gr].cmds.push(c);
+});
+SEQUENCES.forEach(function(s){
+  if(!gmap[s.gr]) gmap[s.gr]={cmds:[],seqs:[]};
+  gmap[s.gr].seqs.push(s);
+});
+
+var cont = g('groups');
+Object.keys(gmap).forEach(function(name) {
+  var item = gmap[name];
+  var div = document.createElement('div');
+  div.className = 'group';
+  var h2 = document.createElement('h2');
+  h2.textContent = name;
+  div.appendChild(h2);
+  var btns = document.createElement('div');
+  btns.className = 'btns';
+  item.cmds.forEach(function(cmd) {
+    var btn = document.createElement('button');
+    btn.textContent = cmd.lb;
+    btn.onclick = (function(b,ac,pl){ return function(){ onCmd(b,ac,pl); }; })(btn,cmd.ac,cmd.pl);
+    btns.appendChild(btn);
+  });
+  item.seqs.forEach(function(seq) {
+    var btn = document.createElement('button');
+    btn.textContent = seq.lb;
+    btn.className = 'seq';
+    btn.onclick = (function(b,steps){ return function(){ b.disabled=true; runSeq(b,steps,0); }; })(btn,seq.steps);
+    btns.appendChild(btn);
+  });
+  div.appendChild(btns);
+  cont.appendChild(div);
+});
+
+function checkStatus() {
+  fetch('/status').then(function(r){ return r.json(); }).then(function(d){
+    var el = g('st');
+    if(d.connected){ el.textContent='WS Connected'; el.className='status ok'; }
+    else { el.textContent='WS Disconnected'; el.className='status err'; }
+  }).catch(function(){ var el=g('st'); el.textContent='Admin Offline'; el.className='status err'; });
+}
+checkStatus();
+setInterval(checkStatus,5000);
+</script>
+</body>
+</html>`;
+
