@@ -122,7 +122,6 @@ const asyncUploadDiagnostics = async (
         status: "UploadFailed",
       }),
     );
-    throw err;
   }
 };
 

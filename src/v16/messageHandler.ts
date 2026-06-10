@@ -113,9 +113,8 @@ export const messageHandlerV16: OcppMessageHandler = {
   handleCall: (vcp: VCP, call: OcppCall<any>): void => {
     const ocppMessage = ocppIncomingMessages[call.action];
     if (!ocppMessage) {
-      throw new Error(
-        `OCPP Incoming Message not implemented for ${call.action}`,
-      );
+      logger.warn(`OCPP Incoming Message not implemented for ${call.action}`);
+      return;
     }
     ocppMessage.reqHandler(vcp, call);
   },
@@ -128,9 +127,8 @@ export const messageHandlerV16: OcppMessageHandler = {
   ): void => {
     const ocppMessage = ocppOutgoingMessages[result.action];
     if (!ocppMessage) {
-      throw new Error(
-        `OCPP Outgoing Message not implemented for ${result.action}`,
-      );
+      logger.warn(`OCPP Outgoing Message not implemented for ${result.action}`);
+      return;
     }
     ocppMessage.resHandler(vcp, call, result);
   },

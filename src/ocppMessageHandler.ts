@@ -1,5 +1,6 @@
 import type { OcppCall, OcppCallError, OcppCallResult } from "./ocppMessage";
 import { OcppVersion } from "./ocppVersion";
+import { logger } from "./logger";
 import { messageHandlerV16 } from "./v16/messageHandler";
 import { messageHandlerV21 } from "./v21/messageHandler";
 import { messageHandlerV201 } from "./v201/messageHandler";
@@ -35,5 +36,10 @@ export const resolveMessageHandler = (
   if (ocppVersion === OcppVersion.OCPP_2_1) {
     return messageHandlerV21;
   }
-  throw new Error(`Ocpp message handler not found for version ${ocppVersion}`);
+  logger.error(`Ocpp message handler not found for version ${ocppVersion}, using no-op handler`);
+  return {
+    handleCall: () => {},
+    handleCallResult: () => {},
+    handleCallError: () => {},
+  };
 };

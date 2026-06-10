@@ -1,5 +1,12 @@
 require("dotenv").config();
 
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception:", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection:", reason);
+});
+
 import { OcppVersion } from "./src/ocppVersion";
 import { bootNotificationOcppOutgoing } from "./src/v201/messages/bootNotification";
 import { statusNotificationOcppOutgoing } from "./src/v201/messages/statusNotification";

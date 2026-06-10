@@ -24,7 +24,8 @@ const getOcppIncomingMessages = (ocppVersion: OcppVersion) => {
     case OcppVersion.OCPP_2_1:
       return ocppIncomingMessages21;
     default:
-      throw new Error(`Ocpp messages not found for version: ${ocppVersion}`);
+      logger.error(`Ocpp messages not found for version: ${ocppVersion}`);
+      return {};
   }
 };
 
@@ -37,7 +38,8 @@ const getOcppOutgoingMessages = (ocppVersion: OcppVersion) => {
     case OcppVersion.OCPP_2_1:
       return ocppOutgoingMessages21;
     default:
-      throw new Error(`Ocpp messages not found for version: ${ocppVersion}`);
+      logger.error(`Ocpp messages not found for version: ${ocppVersion}`);
+      return {};
   }
 };
 

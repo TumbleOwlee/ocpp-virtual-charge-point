@@ -114,7 +114,11 @@ export class VCP {
 
       this.ws.on("open", async () => {
         if (this.vcpOptions.onConnected) {
-          await this.vcpOptions.onConnected(this);
+          try {
+            await this.vcpOptions.onConnected(this);
+          } catch (e) {
+            logger.error(`Error in onConnected callback: ${e}`);
+          }
         }
         resolve();
       });
@@ -139,7 +143,8 @@ export class VCP {
   // biome-ignore lint/suspicious/noExplicitAny: ocpp types
   send(ocppCall: OcppCall<any>) {
     if (!this.ws) {
-      throw new Error("Websocket not initialized. Call connect() first");
+      logger.error("Cannot send: WebSocket not connected");
+      return;
     }
     ocppOutbox.enqueue(ocppCall);
     const jsonMessage = JSON.stringify([
@@ -149,33 +154,51 @@ export class VCP {
       ocppCall.payload,
     ]);
     logger.info(`Sending message ➡️  ${jsonMessage}`);
-    validateOcppOutgoingRequest(
-      this.vcpOptions.ocppVersion,
-      ocppCall.action,
-      JSON.parse(JSON.stringify(ocppCall.payload)),
-    );
-    this.ws.send(jsonMessage);
+    try {
+      validateOcppOutgoingRequest(
+        this.vcpOptions.ocppVersion,
+        ocppCall.action,
+        JSON.parse(JSON.stringify(ocppCall.payload)),
+      );
+    } catch (e) {
+      logger.error(`Schema validation error for ${ocppCall.action}: ${e}`);
+    }
+    try {
+      this.ws.send(jsonMessage);
+    } catch (e) {
+      logger.error(`Failed to send WebSocket message: ${e}`);
+    }
   }
 
   // biome-ignore lint/suspicious/noExplicitAny: ocpp types
   respond(result: OcppCallResult<any>) {
     if (!this.ws) {
-      throw new Error("Websocket not initialized. Call connect() first");
+      logger.error("Cannot respond: WebSocket not connected");
+      return;
     }
     const jsonMessage = JSON.stringify([3, result.messageId, result.payload]);
     logger.info(`Responding with ➡️  ${jsonMessage}`);
-    validateOcppIncomingResponse(
-      this.vcpOptions.ocppVersion,
-      result.action,
-      JSON.parse(JSON.stringify(result.payload)),
-    );
-    this.ws.send(jsonMessage);
+    try {
+      validateOcppIncomingResponse(
+        this.vcpOptions.ocppVersion,
+        result.action,
+        JSON.parse(JSON.stringify(result.payload)),
+      );
+    } catch (e) {
+      logger.error(`Schema validation error for ${result.action}: ${e}`);
+    }
+    try {
+      this.ws.send(jsonMessage);
+    } catch (e) {
+      logger.error(`Failed to send WebSocket response: ${e}`);
+    }
   }
 
   // biome-ignore lint/suspicious/noExplicitAny: ocpp types
   respondError(error: OcppCallError<any>) {
     if (!this.ws) {
-      throw new Error("Websocket not initialized. Call connect() first");
+      logger.error("Cannot respondError: WebSocket not connected");
+      return;
     }
     const jsonMessage = JSON.stringify([
       4,
@@ -185,7 +208,11 @@ export class VCP {
       error.errorDetails,
     ]);
     logger.info(`Responding with ➡️  ${jsonMessage}`);
-    this.ws.send(jsonMessage);
+    try {
+      this.ws.send(jsonMessage);
+    } catch (e) {
+      logger.error(`Failed to send WebSocket error response: ${e}`);
+    }
   }
 
   configureHeartbeat(interval: number) {
@@ -220,14 +247,11 @@ export class VCP {
 
   async getDiagnosticData(): Promise<LogEntry[]> {
     try {
-      // Get logs from Winston logger's memory
       const transport = logger.transports[0];
 
-      // Create a promise that resolves with collected logs
       const logStream = new Promise<LogEntry[]>((resolve) => {
         const entries: LogEntry[] = [];
 
-        // Listen for new logs
         transport.on(
           "logged",
           (info: {
@@ -250,7 +274,6 @@ export class VCP {
           },
         );
 
-        // Resolve after a short delay to collect recent logs
         setTimeout(() => resolve(entries), 10000);
       });
 
@@ -281,43 +304,63 @@ export class VCP {
     const [type, ...rest] = data;
     if (type === 2) {
       const [messageId, action, payload] = rest;
-      validateOcppIncomingRequest(this.vcpOptions.ocppVersion, action, payload);
-      this.messageHandler.handleCall(this, { messageId, action, payload });
+      try {
+        validateOcppIncomingRequest(this.vcpOptions.ocppVersion, action, payload);
+      } catch (e) {
+        logger.error(`Incoming request validation error for ${action}: ${e}`);
+      }
+      try {
+        this.messageHandler.handleCall(this, { messageId, action, payload });
+      } catch (e) {
+        logger.error(`Error handling incoming call ${action}: ${e}`);
+      }
       if (this.postMessageActions[action]) {
         logger.info(`Executing postMessageAction for ${action}`);
-        this.postMessageActions[action]();
+        try {
+          this.postMessageActions[action]();
+        } catch (e) {
+          logger.error(`Error in postMessageAction for ${action}: ${e}`);
+        }
       }
     } else if (type === 3) {
       const [messageId, payload] = rest;
       const enqueuedCall = ocppOutbox.get(messageId);
       if (!enqueuedCall) {
-        if (process.env.CONTINUE_ON_UNKNOWN_MESSAGE_ID) {
-          return;
-        }
-        throw new Error(
-          `Received CallResult for unknown messageId=${messageId}`,
-        );
+        logger.error(`Received CallResult for unknown messageId=${messageId}`);
+        return;
       }
-      validateOcppOutgoingResponse(
-        this.vcpOptions.ocppVersion,
-        enqueuedCall.action,
-        payload,
-      );
-      this.messageHandler.handleCallResult(this, enqueuedCall, {
-        messageId,
-        payload,
-        action: enqueuedCall.action,
-      });
+      try {
+        validateOcppOutgoingResponse(
+          this.vcpOptions.ocppVersion,
+          enqueuedCall.action,
+          payload,
+        );
+      } catch (e) {
+        logger.error(`Outgoing response validation error for ${enqueuedCall.action}: ${e}`);
+      }
+      try {
+        this.messageHandler.handleCallResult(this, enqueuedCall, {
+          messageId,
+          payload,
+          action: enqueuedCall.action,
+        });
+      } catch (e) {
+        logger.error(`Error handling CallResult for ${enqueuedCall.action}: ${e}`);
+      }
     } else if (type === 4) {
       const [messageId, errorCode, errorDescription, errorDetails] = rest;
-      this.messageHandler.handleCallError(this, {
-        messageId,
-        errorCode,
-        errorDescription,
-        errorDetails,
-      });
+      try {
+        this.messageHandler.handleCallError(this, {
+          messageId,
+          errorCode,
+          errorDescription,
+          errorDetails,
+        });
+      } catch (e) {
+        logger.error(`Error handling CallError: ${e}`);
+      }
     } else {
-      throw new Error(`Unrecognized message type ${type}`);
+      logger.error(`Unrecognized message type ${type}`);
     }
   }
 
@@ -548,4 +591,3 @@ setInterval(checkStatus,5000);
 </script>
 </body>
 </html>`;
-
