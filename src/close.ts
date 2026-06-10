@@ -6,19 +6,20 @@ const vcps: Map<VCP, () => Promise<VCP>> = new Map();
 
 export async function close(vcp: VCP) {
   if (!process.env.AUTO_RESTART) {
-    process.exit(1);
+    logger.error("Connection lost. Set AUTO_RESTART=true to enable reconnect.");
+    return;
   }
 
   logger.info("Auto-restart enabled. Closing old VCP...");
   vcp.close();
-  logger.info("Waiting for 3 seconds...");
-  await delay(3000);
+  logger.info("Waiting for 15 seconds...");
+  await delay(15000);
   logger.info("Starting new VCP");
 
   const main = vcps.get(vcp);
   if (!main) {
     logger.error("Main function not found for VCP");
-    process.exit(1);
+    return;
   }
 
   deregisterVcp(vcp);

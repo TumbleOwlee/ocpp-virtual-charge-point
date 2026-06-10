@@ -9,8 +9,6 @@ export const CONFIG = {
   disconnectProbability: parseFloat(
     process.env.DISCONNECT_PROBABILITY ?? "0.01",
   ),
-  sessionMinMinutes: parseFloat(process.env.SESSION_MIN_MINUTES ?? "2"),
-  sessionMaxMinutes: parseFloat(process.env.SESSION_MAX_MINUTES ?? "10"),
   logLevel: (process.env.LOG_LEVEL ?? "info") as "info" | "debug",
   scenarios: process.env.SCENARIOS ?? "",
   chaosMode: (process.env.CHAOS_MODE ?? "false").toLowerCase() === "true",
