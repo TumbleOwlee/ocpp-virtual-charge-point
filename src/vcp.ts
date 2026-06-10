@@ -193,6 +193,10 @@ export class VCP {
     }, interval);
   }
 
+  isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
   close() {
     this.isFinishing = true;
     if (this.heartbeatIntervalId) {
