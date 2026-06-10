@@ -67,6 +67,7 @@ export class Station {
   pendingCalls: Map<string, PendingCall> = new Map();
   reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   meterBaseWh = 0; // cumulative meter across sessions
+  chargingProfileLimitW: number | null = null;
   intentionalDisconnect = false;
   destroyed = false;
 
@@ -355,6 +356,30 @@ export class Station {
             ? { status: "Accepted" }
             : { setVariableResult: [] },
         );
+        break;
+      }
+      case "SetChargingProfile": {
+        this.sendResponse(msgId, { status: "Accepted" });
+        // biome-ignore lint/suspicious/noExplicitAny: ocpp charging profile
+        const profile: any =
+          this.protocol === "ocpp1.6"
+            ? payload.csChargingProfiles
+            : payload.chargingProfile;
+        // biome-ignore lint/suspicious/noExplicitAny: ocpp charging schedule
+        const schedule: any =
+          this.protocol === "ocpp1.6"
+            ? profile?.chargingSchedule
+            : profile?.chargingSchedule?.[0];
+        if (schedule?.chargingSchedulePeriod?.length > 0) {
+          const limit = schedule.chargingSchedulePeriod[0].limit as number;
+          const rateUnit = (schedule.chargingRateUnit ?? "A") as string;
+          this.chargingProfileLimitW = rateUnit === "W" ? limit : limit * 230;
+        }
+        break;
+      }
+      case "ClearChargingProfile": {
+        this.sendResponse(msgId, { status: "Accepted" });
+        this.chargingProfileLimitW = null;
         break;
       }
       case "TriggerMessage": {

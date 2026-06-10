@@ -16,10 +16,9 @@ export interface ChargingSession {
   transactionId: number | string | null;
   idTag: string;
   meterStartWh: number;
-  targetEnergyWh: number;
-  currentEnergyWh: number;
+  accumulatedEnergyWh: number;
+  lastMeterAt: number;
   startedAt: number;
-  durationMs: number;
   meterTimer: ReturnType<typeof setInterval> | null;
   seqNo: number; // for OCPP 2.0.1
 }

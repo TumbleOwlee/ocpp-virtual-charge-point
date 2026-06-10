@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from "node:crypto";
-import { CONFIG, randomBetween, randomInt, randomRfid } from "./config.js";
+import { CONFIG, randomRfid } from "./config.js";
 import { C, logInfo, stats } from "./stats.js";
 import type { ChargingSession, OcppProtocol } from "./types.js";
 
@@ -17,8 +17,17 @@ interface ChargingStation {
   state: string;
   session: ChargingSession | null;
   meterBaseWh: number;
+  chargingProfileLimitW: number | null;
   send(action: string, payload: unknown): Promise<unknown>;
   sendStatusNotification(status: string): Promise<void>;
+}
+
+// When no ChargingProfile is active the station charges at its rated maximum.
+const DEFAULT_MAX_POWER_W = 22_000;
+const NOMINAL_VOLTAGE_V = 230;
+
+function activePowerW(station: ChargingStation): number {
+  return station.chargingProfileLimitW ?? DEFAULT_MAX_POWER_W;
 }
 
 // ---------------------------------------------------------------------------
@@ -33,29 +42,19 @@ export function startChargingSession(
   if (station.session || station.state !== "available") return;
 
   const rfid = idTag ?? randomRfid();
-  const targetKwh = randomBetween(5, 80);
-  const targetEnergyWh = targetKwh * 1000;
-  const durationMs = randomBetween(
-    CONFIG.sessionMinMinutes * 60_000,
-    CONFIG.sessionMaxMinutes * 60_000,
-  );
 
   station.session = {
     transactionId: null,
     idTag: rfid,
     meterStartWh: station.meterBaseWh,
-    targetEnergyWh,
-    currentEnergyWh: 0,
+    accumulatedEnergyWh: 0,
+    lastMeterAt: Date.now(),
     startedAt: Date.now(),
-    durationMs,
     meterTimer: null,
     seqNo: 0,
   };
 
-  logInfo(
-    station.id,
-    `${C.yellow}Started charging${C.reset} (${rfid}, target: ${targetKwh.toFixed(1)} kWh, ${(durationMs / 60_000).toFixed(1)} min)`,
-  );
+  logInfo(station.id, `${C.yellow}Started charging${C.reset} (${rfid})`);
 
   if (station.protocol === "ocpp1.6") {
     startSession16(station, connectorId);
@@ -86,34 +85,21 @@ async function startSession16(
   });
   if (!station.session) return;
 
-  // Extract transactionId
   if (response && typeof response === "object") {
     const res = response as Record<string, unknown>;
-    if (typeof res.transactionId === "number") {
-      station.session.transactionId = res.transactionId;
-    } else {
-      station.session.transactionId = randomInt(100000, 999999);
-    }
+    station.session.transactionId =
+      typeof res.transactionId === "number" ? res.transactionId : Math.floor(Math.random() * 900000) + 100000;
   } else {
-    station.session.transactionId = randomInt(100000, 999999);
+    station.session.transactionId = Math.floor(Math.random() * 900000) + 100000;
   }
 
   station.state = "charging";
   await station.sendStatusNotification("Charging");
   if (!station.session) return;
 
-  // Start MeterValues loop
   station.session.meterTimer = setInterval(() => {
     sendMeterValues16(station, connectorId);
   }, CONFIG.meterIntervalMs);
-
-  // Schedule stop
-  const durationMs = station.session.durationMs;
-  setTimeout(() => {
-    if (station.session && station.state === "charging") {
-      stopChargingSession(station, "Local");
-    }
-  }, durationMs);
 }
 
 function sendMeterValues16(
@@ -122,13 +108,14 @@ function sendMeterValues16(
 ): void {
   if (!station.session) return;
 
-  const elapsed = Date.now() - station.session.startedAt;
-  const progress = Math.min(elapsed / station.session.durationMs, 1);
-  station.session.currentEnergyWh =
-    progress * station.session.targetEnergyWh;
+  const now = Date.now();
+  const elapsedMs = now - station.session.lastMeterAt;
+  const powerW = activePowerW(station);
+  station.session.accumulatedEnergyWh += powerW * (elapsedMs / 3_600_000);
+  station.session.lastMeterAt = now;
 
-  const totalMeterWh =
-    station.session.meterStartWh + station.session.currentEnergyWh;
+  const totalMeterWh = station.session.meterStartWh + station.session.accumulatedEnergyWh;
+  const currentA = powerW / NOMINAL_VOLTAGE_V;
 
   station.send("MeterValues", {
     connectorId,
@@ -143,24 +130,19 @@ function sendMeterValues16(
             unit: "kWh",
           },
           {
-            value: randomBetween(3, 22).toFixed(1),
+            value: (powerW / 1000).toFixed(3),
             measurand: "Power.Active.Import",
             unit: "kW",
           },
           {
-            value: randomBetween(220, 240).toFixed(1),
+            value: NOMINAL_VOLTAGE_V.toFixed(1),
             measurand: "Voltage",
             unit: "V",
           },
           {
-            value: randomBetween(8, 32).toFixed(1),
+            value: currentA.toFixed(1),
             measurand: "Current.Import",
             unit: "A",
-          },
-          {
-            value: randomInt(20, 95).toString(),
-            measurand: "SoC",
-            unit: "Percent",
           },
         ],
       },
@@ -175,7 +157,7 @@ async function stopSession16(
   if (!station.session) return;
 
   const meterStop = Math.floor(
-    station.session.meterStartWh + station.session.currentEnergyWh,
+    station.session.meterStartWh + station.session.accumulatedEnergyWh,
   );
 
   await station.send("StopTransaction", {
@@ -241,18 +223,9 @@ async function startSession201(
   await station.sendStatusNotification("Charging");
   if (!station.session) return;
 
-  // Start MeterValues loop
   station.session.meterTimer = setInterval(() => {
     sendMeterValues201(station, connectorId);
   }, CONFIG.meterIntervalMs);
-
-  // Schedule stop
-  const durationMs = station.session.durationMs;
-  setTimeout(() => {
-    if (station.session && station.state === "charging") {
-      stopChargingSession(station, "Local");
-    }
-  }, durationMs);
 }
 
 function sendMeterValues201(
@@ -261,11 +234,15 @@ function sendMeterValues201(
 ): void {
   if (!station.session) return;
 
-  const elapsed = Date.now() - station.session.startedAt;
-  const progress = Math.min(elapsed / station.session.durationMs, 1);
-  station.session.currentEnergyWh =
-    progress * station.session.targetEnergyWh;
+  const now = Date.now();
+  const elapsedMs = now - station.session.lastMeterAt;
+  const powerW = activePowerW(station);
+  station.session.accumulatedEnergyWh += powerW * (elapsedMs / 3_600_000);
+  station.session.lastMeterAt = now;
   station.session.seqNo++;
+
+  const totalMeterWh = station.session.meterStartWh + station.session.accumulatedEnergyWh;
+  const currentA = powerW / NOMINAL_VOLTAGE_V;
 
   station.send("TransactionEvent", {
     eventType: "Updated",
@@ -285,24 +262,24 @@ function sendMeterValues201(
         timestamp: new Date().toISOString(),
         sampledValue: [
           {
-            value: parseFloat(
-              (
-                station.session.meterStartWh +
-                station.session.currentEnergyWh
-              ).toFixed(1),
-            ),
+            value: parseFloat(totalMeterWh.toFixed(1)),
             measurand: "Energy.Active.Import.Register",
             unitOfMeasure: { unit: "Wh" },
           },
           {
-            value: parseFloat(randomBetween(3000, 22000).toFixed(0)),
+            value: parseFloat(powerW.toFixed(0)),
             measurand: "Power.Active.Import",
             unitOfMeasure: { unit: "W" },
           },
           {
-            value: parseFloat(randomBetween(220, 240).toFixed(1)),
+            value: parseFloat(NOMINAL_VOLTAGE_V.toFixed(1)),
             measurand: "Voltage",
             unitOfMeasure: { unit: "V" },
+          },
+          {
+            value: parseFloat(currentA.toFixed(2)),
+            measurand: "Current.Import",
+            unitOfMeasure: { unit: "A" },
           },
         ],
       },
@@ -317,7 +294,6 @@ async function stopSession201(
   if (!station.session) return;
 
   station.session.seqNo++;
-
   const stoppedReason = reason === "Remote" ? "Remote" : "Local";
 
   await station.send("TransactionEvent", {
@@ -340,10 +316,7 @@ async function stopSession201(
         sampledValue: [
           {
             value: parseFloat(
-              (
-                station.session.meterStartWh +
-                station.session.currentEnergyWh
-              ).toFixed(1),
+              (station.session.meterStartWh + station.session.accumulatedEnergyWh).toFixed(1),
             ),
             measurand: "Energy.Active.Import.Register",
             unitOfMeasure: { unit: "Wh" },
@@ -364,22 +337,18 @@ export async function stopChargingSession(
 ): Promise<void> {
   if (!station.session) return;
 
-  // Capture session ref before any async work — disconnect can null it mid-await
   const session = station.session;
 
-  // Finalize energy
-  const elapsed = Date.now() - session.startedAt;
-  const progress = Math.min(elapsed / session.durationMs, 1);
-  session.currentEnergyWh = progress * session.targetEnergyWh;
-
-  const deliveredKwh = session.currentEnergyWh / 1000;
-  const durationMin = elapsed / 60_000;
-
-  // Clear meter timer
   if (session.meterTimer) {
     clearInterval(session.meterTimer);
     session.meterTimer = null;
   }
+
+  // Final energy accumulation up to stop moment
+  const now = Date.now();
+  const elapsedMs = now - session.lastMeterAt;
+  session.accumulatedEnergyWh += activePowerW(station) * (elapsedMs / 3_600_000);
+  session.lastMeterAt = now;
 
   station.state = "finishing";
 
@@ -389,13 +358,14 @@ export async function stopChargingSession(
     await stopSession201(station, reason);
   }
 
-  // Update base meter
-  station.meterBaseWh += session.currentEnergyWh;
+  const deliveredKwh = session.accumulatedEnergyWh / 1000;
+  const durationMin = (now - session.startedAt) / 60_000;
 
-  // Update stats
+  station.meterBaseWh += session.accumulatedEnergyWh;
+
   stats.sessionsCompleted++;
   stats.totalEnergyKwh += deliveredKwh;
-  stats.totalSessionDurationMs += elapsed;
+  stats.totalSessionDurationMs += now - session.startedAt;
   stats.sessionCount++;
 
   logInfo(
@@ -418,13 +388,15 @@ export function abortSession(station: ChargingStation): void {
     clearInterval(station.session.meterTimer);
     station.session.meterTimer = null;
   }
-  const elapsed = Date.now() - station.session.startedAt;
-  const progress = Math.min(elapsed / station.session.durationMs, 1);
-  const deliveredKwh = (progress * station.session.targetEnergyWh) / 1000;
-  station.meterBaseWh += progress * station.session.targetEnergyWh;
+  const now = Date.now();
+  const elapsedMs = now - station.session.lastMeterAt;
+  station.session.accumulatedEnergyWh += activePowerW(station) * (elapsedMs / 3_600_000);
+
+  const deliveredKwh = station.session.accumulatedEnergyWh / 1000;
+  station.meterBaseWh += station.session.accumulatedEnergyWh;
   stats.sessionsCompleted++;
   stats.totalEnergyKwh += deliveredKwh;
-  stats.totalSessionDurationMs += elapsed;
+  stats.totalSessionDurationMs += now - station.session.startedAt;
   stats.sessionCount++;
   station.session = null;
 }
